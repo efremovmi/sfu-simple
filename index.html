@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Simple SFU Client</title>
+</head>
+<body>
+
+<link rel="icon" href="data:,">
+
+<h3 id="status">Connecting...</h3>
+<button onclick="start()">Start</button>
+
+<video id="local" autoplay muted playsinline style="width:300px;"></video>
+<video id="remote" autoplay playsinline style="width:300px;"></video>
+
+<script>
+    let isInitiator = false;
+    let localStream = null;
+
+    const statusEl = document.getElementById("status");
+    const local = document.getElementById("local");
+    const remote = document.getElementById("remote");
+
+    const pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    });
+
+    const ws = new WebSocket("wss://your_ip:8080/ws");
+
+    // Получаем медиапоток и добавляем треки в соединение
+    async function getMediaStream() {
+        if (!localStream) {
+            localStream = await navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: true
+            });
+            local.srcObject = localStream;
+
+            // Добавляем все треки в RTCPeerConnection
+            localStream.getTracks().forEach(track => {
+                pc.addTrack(track, localStream);
+            });
+        }
+        return localStream;
+    }
+
+    // Отправка ICE кандидатов на сервер
+    pc.onicecandidate = e => {
+        if (e.candidate) ws.send(JSON.stringify(e.candidate));
+    };
+
+    // Подписка на новые треки
+    pc.ontrack = e => {
+        if (!remote.srcObject) {
+            remote.srcObject = new MediaStream();
+        }
+        e.streams[0].getTracks().forEach(track => {
+            // Добавляем новые треки в MediaStream
+            if (!remote.srcObject.getTracks().some(t => t.id === track.id)) {
+                remote.srcObject.addTrack(track);
+            }
+        });
+        // statusEl.innerText = "Connected 🎉";
+    };
+
+    // Отображение статусов ICE и подключения
+    pc.oniceconnectionstatechange = () => {
+        statusEl.innerText = "ICE: " + pc.iceConnectionState;
+    };
+    pc.onconnectionstatechange = () => {
+        if ( pc.connectionState === "connected"){
+            statusEl.innerText = "Connected 🎉";
+        } else{
+            statusEl.innerText = "Connection: " + pc.connectionState;
+        }
+
+    };
+
+    // Обработка сообщений от сервера
+    ws.onmessage = async e => {
+        const msg = JSON.parse(e.data);
+
+        if (msg.type === "role") {
+            isInitiator = msg.initiator;
+            statusEl.innerText = isInitiator ? "Waiting for peer..." : "Joining call...(waiting initiator)";
+            return;
+        }
+
+        if (msg.type) {
+            const sdp = new RTCSessionDescription(msg);
+            await pc.setRemoteDescription(sdp);
+
+            if (sdp.type === "offer") {
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                ws.send(JSON.stringify(answer));
+            }
+        } else if (msg.candidate) {
+            await pc.addIceCandidate(msg);
+        }
+    };
+
+    // Нажатие кнопки Start
+    async function start() {
+        // Получаем медиапоток
+        await getMediaStream();
+
+        // Инициатор создаёт offer один раз
+        if (isInitiator) {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            ws.send(JSON.stringify(offer));
+        }
+    }
+</script>
+
+</body>
+</html>
